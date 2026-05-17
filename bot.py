@@ -1,350 +1,337 @@
+import os
 import sqlite3
+import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
-BOT_TOKEN = "8759550786:AAE1T-FqhBrd-yhzy6UQa0sk93JiufQznaw"
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-BOT_USERNAME = "Spooky_stake_bot"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is not set")
 
-# Only this admin can manage the bot
-ADMIN_IDS = [
-    8196147769
-]
-
-CHANNEL_ID = -1003717278830
-
-DB_NAME = "have_users.db"
-
+DB_FILE = "bot_database.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-
-    conn.execute("""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            first_name TEXT
+            first_name TEXT,
+            last_name TEXT,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    """)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-            message_id INTEGER PRIMARY KEY,
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS admins (
+            user_id INTEGER PRIMARY KEY,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS photo_cache (
+            photo_id TEXT PRIMARY KEY,
             file_id TEXT,
-            caption TEXT
+            cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    """)
-
+    ''')
     conn.commit()
     conn.close()
 
-
-def add_user(user_id, username, first_name):
-    conn = sqlite3.connect(DB_NAME)
-
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO users
-        (user_id, username, first_name)
-        VALUES (?, ?, ?)
-        """,
-        (user_id, username, first_name)
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def save_post(message_id, file_id, caption):
-    conn = sqlite3.connect(DB_NAME)
-
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO posts
-        (message_id, file_id, caption)
-        VALUES (?, ?, ?)
-        """,
-        (message_id, file_id, caption)
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def get_post(message_id):
-    conn = sqlite3.connect(DB_NAME)
-
-    post = conn.execute(
-        "SELECT file_id, caption FROM posts WHERE message_id = ?",
-        (message_id,)
-    ).fetchone()
-
-    conn.close()
-
-    return post
-
+def add_user_to_db(user_id, username, first_name, last_name):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT OR IGNORE INTO users (user_id, username, first_name, last_name)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, username, first_name, last_name))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error adding user to database: {e}")
+    finally:
+        conn.close()
 
 def get_all_users():
-    conn = sqlite3.connect(DB_NAME)
-
-    users = conn.execute(
-        "SELECT user_id FROM users"
-    ).fetchall()
-
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id FROM users')
+    users = [row[0] for row in cursor.fetchall()]
     conn.close()
+    return users
 
-    return [u[0] for u in users]
+def get_user_info(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('SELECT username, first_name, last_name FROM users WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result
 
+def get_admin_ids():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id FROM admins')
+    admins = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return admins
 
-# =========================
-# CHANNEL POSTS
-# =========================
+def add_admin(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (user_id,))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error adding admin: {e}")
+    finally:
+        conn.close()
 
-async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    post = update.channel_post
-
-    if not post:
-        return
-
-    if not post.photo:
-        return
-
-    file_id = post.photo[-1].file_id
-    caption = post.caption or ""
-
-    save_post(
-        post.message_id,
-        file_id,
-        caption
-    )
-
-    deep_link = (
-        f"https://t.me/{BOT_USERNAME}"
-        f"?start=have_{post.message_id}"
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "Have 👍",
-                url=deep_link
-            )
-        ]
-    ])
-
-    await context.bot.edit_message_reply_markup(
-        chat_id=post.chat_id,
-        message_id=post.message_id,
-        reply_markup=keyboard
-    )
-
-
-# =========================
-# START
-# =========================
+def cache_photo(photo_id, file_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT OR REPLACE INTO photo_cache (photo_id, file_id)
+            VALUES (?, ?)
+        ''', (photo_id, file_id))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error caching photo: {e}")
+    finally:
+        conn.close()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = update.effective_user
-
-    if (
-        context.args
-        and context.args[0].startswith("have_")
-    ):
-
-        post_id = int(
-            context.args[0].replace("have_", "")
-        )
-
-        add_user(
-            user.id,
-            user.username,
-            user.first_name
-        )
-
-        post = get_post(post_id)
-
-        if not post:
-            await update.message.reply_text(
-                "Match not found."
-            )
-            return
-
-        file_id, caption = post
-
-        await context.bot.send_photo(
-            chat_id=user.id,
-            photo=file_id,
-            caption=(
-                f"{caption}\n\n"
-                "📌 Match Notification Bot 📌\n\n"
-                "1️⃣ Reply to this photo with your bet amount.\n"
-                "Example: €10\n\n"
-                "2️⃣ To remove your bet, reply:\n"
-                "delete bet"
-            )
-        )
-
-        username = (
-            f"@{user.username}"
-            if user.username
-            else "No username"
-        )
-
-        for admin_id in ADMIN_IDS:
-
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=(
-                    "🔥 New Have Click\n\n"
-                    f"Name: {user.first_name}\n"
-                    f"Username: {username}\n"
-                    f"User ID: {user.id}\n"
-                    f"Post ID: {post_id}"
-                )
-            )
-
-    else:
-        await update.message.reply_text(
-            "Welcome 🙂"
-        )
-
-
-# =========================
-# ADMIN BROADCAST
-# =========================
-
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-
-    users = get_all_users()
-
-    sent = 0
-    failed = 0
-
-    for user_id in users:
-
-        try:
-            await update.message.copy(
-                chat_id=user_id
-            )
-
-            sent += 1
-
-        except Exception as e:
-            print(e)
-            failed += 1
-
     await update.message.reply_text(
-        f"Sent to {sent} users\n"
-        f"Failed for {failed}"
+        "Welcome to the bot! I'm monitoring the channel for photos."
     )
 
-
-# =========================
-# USER REPLIES
-# =========================
-
-async def user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = update.effective_user
-
-    if user.id in ADMIN_IDS:
-        return
-
-    if not update.message.reply_to_message:
-        return
-
-    username = (
-        f"@{user.username}"
-        if user.username
-        else "No username"
-    )
-
-    message_text = (
-        update.message.text
-        if update.message.text
-        else "Non-text message"
-    )
-
-    for admin_id in ADMIN_IDS:
-
-        await context.bot.send_message(
-            chat_id=admin_id,
-            text=(
-                "📩 New Bet Reply\n\n"
-                f"Name: {user.first_name}\n"
-                f"Username: {username}\n"
-                f"User ID: {user.id}\n\n"
-                f"Reply:\n{message_text}"
+async def channel_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.channel_post and update.channel_post.photo:
+        photo = update.channel_post.photo[-1]
+        cache_photo(photo.file_id, photo.file_id)
+        keyboard = [
+            [InlineKeyboardButton("Have 👍", callback_data=f"photo_{photo.file_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=update.channel_post.chat_id,
+                message_id=update.channel_post.message_id,
+                reply_markup=reply_markup
             )
+            logger.info(f"Added button to photo in channel {update.channel_post.chat_id}")
+        except Exception as e:
+            logger.error(f"Error adding button to channel photo: {e}")
+
+async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    username = query.from_user.username or "N/A"
+    first_name = query.from_user.first_name or ""
+    last_name = query.from_user.last_name or ""
+    
+    add_user_to_db(user_id, username, first_name, last_name)
+    photo_file_id = query.data.replace("photo_", "")
+    
+    try:
+        await context.bot.send_photo(
+            chat_id=user_id,
+            photo=photo_file_id,
+            caption="Here's the photo from the channel!"
         )
+    except Exception as e:
+        logger.error(f"Error sending photo to user {user_id}: {e}")
+    
+    admin_ids = get_admin_ids()
+    notification = (
+        f"📌 New user interaction:\n"
+        f"👤 Name: {first_name} {last_name}\n"
+        f"📱 Username: @{username}\n"
+        f"🆔 User ID: {user_id}"
+    )
+    
+    for admin_id in admin_ids:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=notification)
+        except Exception as e:
+            logger.error(f"Error sending notification to admin {admin_id}: {e}")
+    
+    await query.edit_message_text(text="✅ Photo sent to your private chat!")
 
-        await context.bot.forward_message(
-            chat_id=admin_id,
-            from_chat_id=user.id,
-            message_id=update.message.message_id
-        )
+async def user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message and update.message.chat.type == "private":
+        user_id = update.message.from_user.id
+        username = update.message.from_user.username or "N/A"
+        first_name = update.message.from_user.first_name or ""
+        last_name = update.message.from_user.last_name or ""
+        
+        admin_ids = get_admin_ids()
+        
+        if user_id in admin_ids:
+            all_users = get_all_users()
+            
+            if update.message.text:
+                for user in all_users:
+                    try:
+                        await context.bot.send_message(chat_id=user, text=update.message.text)
+                    except Exception as e:
+                        logger.error(f"Error sending message to user {user}: {e}")
+            
+            elif update.message.photo:
+                photo = update.message.photo[-1]
+                for user in all_users:
+                    try:
+                        await context.bot.send_photo(
+                            chat_id=user,
+                            photo=photo.file_id,
+                            caption=update.message.caption or ""
+                        )
+                    except Exception as e:
+                        logger.error(f"Error sending photo to user {user}: {e}")
+            
+            elif update.message.video:
+                video = update.message.video
+                for user in all_users:
+                    try:
+                        await context.bot.send_video(
+                            chat_id=user,
+                            video=video.file_id,
+                            caption=update.message.caption or ""
+                        )
+                    except Exception as e:
+                        logger.error(f"Error sending video to user {user}: {e}")
+            
+            elif update.message.document:
+                document = update.message.document
+                for user in all_users:
+                    try:
+                        await context.bot.send_document(
+                            chat_id=user,
+                            document=document.file_id,
+                            caption=update.message.caption or ""
+                        )
+                    except Exception as e:
+                        logger.error(f"Error sending document to user {user}: {e}")
+            
+            await update.message.reply_text("✅ Message broadcasted to all users!")
+        
+        else:
+            admin_ids = get_admin_ids()
+            
+            if not admin_ids:
+                await update.message.reply_text("❌ No admins configured yet.")
+                return
+            
+            user_info = (
+                f"📨 Message from user:\n"
+                f"👤 Name: {first_name} {last_name}\n"
+                f"📱 Username: @{username}\n"
+                f"🆔 User ID: {user_id}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+            )
+            
+            for admin_id in admin_ids:
+                try:
+                    await context.bot.send_message(chat_id=admin_id, text=user_info)
+                    
+                    if update.message.text:
+                        await context.bot.send_message(chat_id=admin_id, text=update.message.text)
+                    elif update.message.photo:
+                        photo = update.message.photo[-1]
+                        await context.bot.send_photo(
+                            chat_id=admin_id,
+                            photo=photo.file_id,
+                            caption=update.message.caption or ""
+                        )
+                    elif update.message.video:
+                        video = update.message.video
+                        await context.bot.send_video(
+                            chat_id=admin_id,
+                            video=video.file_id,
+                            caption=update.message.caption or ""
+                        )
+                    elif update.message.document:
+                        document = update.message.document
+                        await context.bot.send_document(
+                            chat_id=admin_id,
+                            document=document.file_id,
+                            caption=update.message.caption or ""
+                        )
+                except Exception as e:
+                    logger.error(f"Error forwarding message to admin {admin_id}: {e}")
+            
+            await update.message.reply_text("✅ Your message has been sent to admins!")
 
+async def add_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    admin_ids = get_admin_ids()
+    
+    if user_id not in admin_ids and len(admin_ids) > 0:
+        await update.message.reply_text("❌ You don't have permission to use this command.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /addadmin <user_id>")
+        return
+    
+    try:
+        new_admin_id = int(context.args[0])
+        add_admin(new_admin_id)
+        await update.message.reply_text(f"✅ User {new_admin_id} added as admin!")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID. Please provide a valid integer.")
 
-# =========================
-# MAIN
-# =========================
+async def list_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    admin_ids = get_admin_ids()
+    
+    if user_id not in admin_ids:
+        await update.message.reply_text("❌ You don't have permission to use this command.")
+        return
+    
+    users = get_all_users()
+    if not users:
+        await update.message.reply_text("No users in database yet.")
+        return
+    
+    message = "📋 Registered Users:\n━━━━━━━━━━━━━━━━━━\n"
+    for uid in users:
+        user_info = get_user_info(uid)
+        if user_info:
+            username, first_name, last_name = user_info
+            message += f"👤 {first_name} {last_name}\n📱 @{username}\n🆔 {uid}\n\n"
+    
+    await update.message.reply_text(message)
 
 def main():
-
     init_db()
-
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(
-        CommandHandler("start", start)
-    )
-
-    app.add_handler(
-        MessageHandler(
-            filters.Chat(CHANNEL_ID)
-            & filters.PHOTO,
-            channel_post_handler
-        )
-    )
-
-    app.add_handler(
-        MessageHandler(
-            filters.ChatType.PRIVATE
-            & filters.User(user_id=ADMIN_IDS)
-            & ~filters.COMMAND,
-            broadcast
-        )
-    )
-
-    app.add_handler(
-        MessageHandler(
-            filters.ChatType.PRIVATE
-            & ~filters.User(user_id=ADMIN_IDS)
-            & ~filters.COMMAND,
-            user_reply
-        )
-    )
-
-    print("Bot is running...")
-
-    app.run_polling(
-        allowed_updates=[
-            "message",
-            "channel_post"
-        ]
-    )
-
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("addadmin", add_admin_command))
+    application.add_handler(CommandHandler("listusers", list_users_command))
+    application.add_handler(CallbackQueryHandler(button_click))
+    application.add_handler(MessageHandler(filters.ALL, user_message))
+    application.add_handler(MessageHandler(filters.UPDATE.CHANNEL_POST, channel_photo))
+    
+    logger.info("Bot started. Polling for updates...")
+    application.run_polling(allowed_updates=["message", "callback_query", "channel_post"])
 
 if __name__ == "__main__":
     main()
