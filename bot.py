@@ -1,100 +1,70 @@
-import os
 import sqlite3
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
-
-# =========================
-# CONFIG
-# =========================
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 BOT_TOKEN = "8759550786:AAE1T-FqhBrd-yhzy6UQa0sk93JiufQznaw"
 
 BOT_USERNAME = "Spooky_stake_bot"
 
-ADMIN_IDS = [
-    8196147769
-]
+ADMIN_IDS = [8196147769]
 
 CHANNEL_ID = -1003717278830
 
 DB_NAME = "have_users.db"
 
 
-# =========================
-# DATABASE
-# =========================
-
 def init_db():
-
     conn = sqlite3.connect(DB_NAME)
 
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT
-        )
-    """)
-
-    conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
-            message_id INTEGER PRIMARY KEY,
+            post_id INTEGER PRIMARY KEY,
             file_id TEXT,
             caption TEXT
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            post_id INTEGER,
+            user_id INTEGER,
+            username TEXT,
+            first_name TEXT,
+            PRIMARY KEY (post_id, user_id)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sent_photos (
+            user_id INTEGER,
+            bot_message_id INTEGER,
+            post_id INTEGER,
+            PRIMARY KEY (user_id, bot_message_id)
+        )
+    """)
+
     conn.commit()
     conn.close()
 
 
-def add_user(user_id, username, first_name):
-
+def save_post(post_id, file_id, caption):
     conn = sqlite3.connect(DB_NAME)
 
     conn.execute(
-        """
-        INSERT OR REPLACE INTO users
-        (user_id, username, first_name)
-        VALUES (?, ?, ?)
-        """,
-        (user_id, username, first_name)
+        "INSERT OR REPLACE INTO posts VALUES (?, ?, ?)",
+        (post_id, file_id, caption)
     )
 
     conn.commit()
     conn.close()
 
 
-def save_post(message_id, file_id, caption):
-
-    conn = sqlite3.connect(DB_NAME)
-
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO posts
-        (message_id, file_id, caption)
-        VALUES (?, ?, ?)
-        """,
-        (message_id, file_id, caption)
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def get_post(message_id):
-
+def get_post(post_id):
     conn = sqlite3.connect(DB_NAME)
 
     post = conn.execute(
-        "SELECT file_id, caption FROM posts WHERE message_id = ?",
-        (message_id,)
+        "SELECT file_id, caption FROM posts WHERE post_id = ?",
+        (post_id,)
     ).fetchone()
 
     conn.close()
@@ -102,17 +72,61 @@ def get_post(message_id):
     return post
 
 
-def get_all_users():
+def add_subscription(post_id, user_id, username, first_name):
+    conn = sqlite3.connect(DB_NAME)
 
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO subscriptions
+        (post_id, user_id, username, first_name)
+        VALUES (?, ?, ?, ?)
+        """,
+        (post_id, user_id, username, first_name)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def get_subscribers(post_id):
     conn = sqlite3.connect(DB_NAME)
 
     users = conn.execute(
-        "SELECT user_id FROM users"
+        "SELECT user_id FROM subscriptions WHERE post_id = ?",
+        (post_id,)
     ).fetchall()
 
     conn.close()
 
     return [u[0] for u in users]
+
+
+def save_sent_photo(user_id, bot_message_id, post_id):
+    conn = sqlite3.connect(DB_NAME)
+
+    conn.execute(
+        "INSERT OR REPLACE INTO sent_photos VALUES (?, ?, ?)",
+        (user_id, bot_message_id, post_id)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def get_post_id_from_reply(user_id, bot_message_id):
+    conn = sqlite3.connect(DB_NAME)
+
+    row = conn.execute(
+        """
+        SELECT post_id FROM sent_photos
+        WHERE user_id = ? AND bot_message_id = ?
+        """,
+        (user_id, bot_message_id)
+    ).fetchone()
+
+    conn.close()
+
+    return row[0] if row else None
 
 
 # =========================
@@ -123,33 +137,19 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     post = update.channel_post
 
-    if not post:
+    if not post or not post.photo:
         return
 
-    if not post.photo:
-        return
-
+    post_id = post.message_id
     file_id = post.photo[-1].file_id
     caption = post.caption or ""
 
-    save_post(
-        post.message_id,
-        file_id,
-        caption
-    )
+    save_post(post_id, file_id, caption)
 
-    deep_link = (
-        f"https://t.me/{BOT_USERNAME}"
-        f"?start=have_{post.message_id}"
-    )
+    deep_link = f"https://t.me/{BOT_USERNAME}?start=have_{post_id}"
 
     keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "Have 👍",
-                url=deep_link
-            )
-        ]
+        [InlineKeyboardButton("Have 👍", url=deep_link)]
     ])
 
     await context.bot.edit_message_reply_markup(
@@ -167,32 +167,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
 
-    if (
-        context.args
-        and context.args[0].startswith("have_")
-    ):
+    if context.args and context.args[0].startswith("have_"):
 
-        post_id = int(
-            context.args[0].replace("have_", "")
-        )
+        post_id = int(context.args[0].replace("have_", ""))
 
-        add_user(
+        post = get_post(post_id)
+
+        if not post:
+            await update.message.reply_text("Match not found.")
+            return
+
+        file_id, caption = post
+
+        add_subscription(
+            post_id,
             user.id,
             user.username,
             user.first_name
         )
 
-        post = get_post(post_id)
-
-        if not post:
-            await update.message.reply_text(
-                "Match not found."
-            )
-            return
-
-        file_id, caption = post
-
-        await context.bot.send_photo(
+        sent_photo = await context.bot.send_photo(
             chat_id=user.id,
             photo=file_id,
             caption=(
@@ -203,6 +197,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "2️⃣ To remove your bet, reply:\n"
                 "delete bet"
             )
+        )
+
+        save_sent_photo(
+            user.id,
+            sent_photo.message_id,
+            post_id
         )
 
         username = (
@@ -220,51 +220,101 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Name: {user.first_name}\n"
                     f"Username: {username}\n"
                     f"User ID: {user.id}\n"
-                    f"Post ID: {post_id}"
+                    f"Post ID: {post_id}\n\n"
+                    f"To send only to this group, use:\n"
+                    f"/send {post_id}"
                 )
             )
 
     else:
         await update.message.reply_text(
-            "Welcome 🙂"
+            "Welcome 🙂\n\n"
+            "Click Have 👍 in the channel to receive the match."
         )
+
+
+# =========================
+# SEND COMMAND
+# =========================
+
+async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+
+    if not context.args:
+
+        await update.message.reply_text(
+            "Use like this:\n/send POST_ID"
+        )
+
+        return
+
+    try:
+        post_id = int(context.args[0])
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "Invalid Post ID."
+        )
+
+        return
+
+    context.user_data["broadcast_post_id"] = post_id
+
+    await update.message.reply_text(
+        f"Okay. Now send the message/photo "
+        f"you want to send only to users "
+        f"from Post ID {post_id}."
+    )
 
 
 # =========================
 # ADMIN BROADCAST
 # =========================
 
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.effective_user.id not in ADMIN_IDS:
         return
 
-    users = get_all_users()
+    post_id = context.user_data.get("broadcast_post_id")
+
+    if not post_id:
+
+        await update.message.reply_text(
+            "Choose a specific post first:\n/send POST_ID"
+        )
+
+        return
+
+    subscribers = get_subscribers(post_id)
 
     sent = 0
     failed = 0
 
-    for user_id in users:
+    for user_id in subscribers:
 
         try:
-            await update.message.copy(
-                chat_id=user_id
-            )
-
+            await update.message.copy(chat_id=user_id)
             sent += 1
 
         except Exception as e:
             print(e)
             failed += 1
 
+    context.user_data["broadcast_post_id"] = None
+
     await update.message.reply_text(
-        f"Sent to {sent} users\n"
-        f"Failed for {failed}"
+        f"Sent only to Post ID {post_id}\n"
+        f"Sent: {sent}\n"
+        f"Failed: {failed}"
     )
 
 
 # =========================
-# USER REPLIES / BETS
+# USER REPLIES
 # =========================
 
 async def user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -275,6 +325,18 @@ async def user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not update.message.reply_to_message:
+        return
+
+    replied_message_id = (
+        update.message.reply_to_message.message_id
+    )
+
+    post_id = get_post_id_from_reply(
+        user.id,
+        replied_message_id
+    )
+
+    if not post_id:
         return
 
     username = (
@@ -289,17 +351,17 @@ async def user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else "Non-text message"
     )
 
-    # Notify admin
     for admin_id in ADMIN_IDS:
 
         await context.bot.send_message(
             chat_id=admin_id,
             text=(
-                "💰 New Bet Received\n\n"
+                "📩 New Bet Reply\n\n"
+                f"Post ID: {post_id}\n"
                 f"Name: {user.first_name}\n"
                 f"Username: {username}\n"
                 f"User ID: {user.id}\n\n"
-                f"Bet:\n{message_text}"
+                f"Reply:\n{message_text}"
             )
         )
 
@@ -307,19 +369,6 @@ async def user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=admin_id,
             from_chat_id=user.id,
             message_id=update.message.message_id
-        )
-
-    # Confirmation to user
-    if message_text.lower() == "delete bet":
-
-        await update.message.reply_text(
-            "✅ Your bet has been deleted."
-        )
-
-    else:
-
-        await update.message.reply_text(
-            f"✅ Bet received: {message_text}"
         )
 
 
@@ -338,6 +387,10 @@ def main():
     )
 
     app.add_handler(
+        CommandHandler("send", send_command)
+    )
+
+    app.add_handler(
         MessageHandler(
             filters.Chat(CHANNEL_ID)
             & filters.PHOTO,
@@ -350,7 +403,7 @@ def main():
             filters.ChatType.PRIVATE
             & filters.User(user_id=ADMIN_IDS)
             & ~filters.COMMAND,
-            broadcast
+            admin_message
         )
     )
 
@@ -363,7 +416,7 @@ def main():
         )
     )
 
-    print("Bot is running on Railway...")
+    print("Bot is running...")
 
     app.run_polling(
         allowed_updates=[
