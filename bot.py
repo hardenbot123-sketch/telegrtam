@@ -18,7 +18,7 @@ BOT_TOKEN = "8759550786:AAE1T-FqhBrd-yhzy6UQa0sk93JiufQznaw"
 BOT_USERNAME = "Spooky_stake_bot"
 
 ADMIN_IDS = [
-    959140085,
+    ,
     8196147769
 ]
 
