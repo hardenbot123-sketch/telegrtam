@@ -1,4 +1,4 @@
-﻿import sqlite3
+import sqlite3
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
