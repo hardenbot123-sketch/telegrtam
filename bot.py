@@ -1,4 +1,5 @@
-﻿import sqlite3
+import os
+import sqlite3
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -8,7 +9,7 @@ from telegram.ext import (
     filters,
 )
 
-BOT_TOKEN = "8759550786:AAE1T-FqhBrd-yhzy6UQa0sk93JiufQznaw"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 BOT_USERNAME = "Spooky_stake_bot"
 
