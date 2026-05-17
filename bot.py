@@ -18,7 +18,6 @@ BOT_TOKEN = "8759550786:AAE1T-FqhBrd-yhzy6UQa0sk93JiufQznaw"
 BOT_USERNAME = "Spooky_stake_bot"
 
 ADMIN_IDS = [
-    ,
     8196147769
 ]
 
@@ -290,7 +289,7 @@ async def user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else "Non-text message"
     )
 
-    # Notify admins
+    # Notify admin
     for admin_id in ADMIN_IDS:
 
         await context.bot.send_message(
