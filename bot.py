@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -5,15 +6,19 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    filters,
+    filters
 )
+
+# =========================
+# CONFIG
+# =========================
 
 BOT_TOKEN = "8759550786:AAE1T-FqhBrd-yhzy6UQa0sk93JiufQznaw"
 
 BOT_USERNAME = "Spooky_stake_bot"
 
-# Only this admin can manage the bot
 ADMIN_IDS = [
+    959140085,
     8196147769
 ]
 
@@ -22,7 +27,12 @@ CHANNEL_ID = -1003717278830
 DB_NAME = "have_users.db"
 
 
+# =========================
+# DATABASE
+# =========================
+
 def init_db():
+
     conn = sqlite3.connect(DB_NAME)
 
     conn.execute("""
@@ -46,6 +56,7 @@ def init_db():
 
 
 def add_user(user_id, username, first_name):
+
     conn = sqlite3.connect(DB_NAME)
 
     conn.execute(
@@ -62,6 +73,7 @@ def add_user(user_id, username, first_name):
 
 
 def save_post(message_id, file_id, caption):
+
     conn = sqlite3.connect(DB_NAME)
 
     conn.execute(
@@ -78,6 +90,7 @@ def save_post(message_id, file_id, caption):
 
 
 def get_post(message_id):
+
     conn = sqlite3.connect(DB_NAME)
 
     post = conn.execute(
@@ -91,6 +104,7 @@ def get_post(message_id):
 
 
 def get_all_users():
+
     conn = sqlite3.connect(DB_NAME)
 
     users = conn.execute(
@@ -251,7 +265,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# USER REPLIES
+# USER REPLIES / BETS
 # =========================
 
 async def user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -276,16 +290,17 @@ async def user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else "Non-text message"
     )
 
+    # Notify admins
     for admin_id in ADMIN_IDS:
 
         await context.bot.send_message(
             chat_id=admin_id,
             text=(
-                "📩 New Bet Reply\n\n"
+                "💰 New Bet Received\n\n"
                 f"Name: {user.first_name}\n"
                 f"Username: {username}\n"
                 f"User ID: {user.id}\n\n"
-                f"Reply:\n{message_text}"
+                f"Bet:\n{message_text}"
             )
         )
 
@@ -293,6 +308,19 @@ async def user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=admin_id,
             from_chat_id=user.id,
             message_id=update.message.message_id
+        )
+
+    # Confirmation to user
+    if message_text.lower() == "delete bet":
+
+        await update.message.reply_text(
+            "✅ Your bet has been deleted."
+        )
+
+    else:
+
+        await update.message.reply_text(
+            f"✅ Bet received: {message_text}"
         )
 
 
@@ -336,7 +364,7 @@ def main():
         )
     )
 
-    print("Bot is running...")
+    print("Bot is running on Railway...")
 
     app.run_polling(
         allowed_updates=[
